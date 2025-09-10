@@ -11,7 +11,7 @@ BOT_PREFIX = "!"
 BOT_TOKEN = os.getenv("STUDYBOT_TOKEN", "")
 DB_PATH   = os.getenv("DB_PATH", "studybot.db")
 
-# 타임존: tzdata 없으면 KST(+9)
+# 타임존
 try:
     TIMEZONE = ZoneInfo("Asia/Seoul")
 except ZoneInfoNotFoundError:
@@ -39,7 +39,6 @@ def fmt_dur(seconds: int) -> str:
     return " ".join(out)
 
 def period_range(kind: str):
-    """[start, end) (둘 다 timezone-aware)"""
     cur = now_dt()
     if kind == "today":
         start = cur.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -49,17 +48,13 @@ def period_range(kind: str):
         end = start + timedelta(days=7)
     elif kind == "month":
         start = cur.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        if start.month == 12:
-            end = start.replace(year=start.year + 1, month=1)
-        else:
-            end = start.replace(month=start.month + 1)
+        end = start.replace(year=start.year+1, month=1) if start.month == 12 else start.replace(month=start.month+1)
     elif kind == "year":
         start = cur.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        end = start.replace(year=start.year + 1)
+        end = start.replace(year=start.year+1)
     elif kind == "all":
-        # 오래된 과거~지금 이후
         start = datetime(1970, 1, 1, tzinfo=TIMEZONE)
-        end = cur + timedelta(days=365 * 100)
+        end   = cur + timedelta(days=365*100)
     else:
         raise ValueError("unknown period")
     return start, end
@@ -67,24 +62,31 @@ def period_range(kind: str):
 def guild_id_of(ctx) -> int:
     return ctx.guild.id if ctx.guild else 0
 
-# SQLite: TEXT(iso)와 INTEGER(epoch) 혼재 호환을 위한 epoch 변환 표현식
 def epoch_expr(col: str) -> str:
-    # typeof(col)='integer'면 그대로, TEXT면 strftime로 epoch 변환
+    # INTEGER면 그대로, TEXT면 epoch으로 캐스팅
     return f"CASE WHEN typeof({col})='integer' THEN {col} ELSE CAST(strftime('%s', {col}) AS INTEGER) END"
+
+# === aiosqlite 호환 fetch 헬퍼 ===
+async def fetchone(db, q, params=()):
+    async with db.execute(q, params) as cur:
+        return await cur.fetchone()
+
+async def fetchall(db, q, params=()):
+    async with db.execute(q, params) as cur:
+        return await cur.fetchall()
 
 # ===== DB =====
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # 타입은 선언만, SQLite는 동적 타입이므로 INTEGER/TEXT 혼재 허용
         await db.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 user_name TEXT,
                 guild_id INTEGER NOT NULL DEFAULT 0,
-                start_ts INTEGER NOT NULL,     -- epoch seconds (권장; 기존 TEXT도 허용)
-                end_ts   INTEGER,              -- NULL = 진행 중
-                duration_seconds INTEGER       -- 종료 시 확정
+                start_ts INTEGER NOT NULL,
+                end_ts   INTEGER,
+                duration_seconds INTEGER
             );
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_user ON sessions(user_id);")
@@ -92,26 +94,26 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_end   ON sessions(end_ts);")
         await db.commit()
 
-# ===== 합계/랭킹 계산 로직 =====
+# ===== 합계/랭킹 계산 =====
 async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s: int, include_active=True) -> int:
-    """end_ts 기준으로 [start_s, end_s) 합계 + (옵션)진행중 포함"""
     e_end = epoch_expr("end_ts")
-    # 종료된 세션 합계
-    q = f"""
-        SELECT COALESCE(SUM(duration_seconds), 0)
-        FROM sessions
-        WHERE user_id=? AND guild_id=?
-          AND end_ts IS NOT NULL
-          AND {e_end} >= ? AND {e_end} < ?
-    """
-    row = await db.execute_fetchone(q, (user_id, guild_id, start_s, end_s))
-    total = int(row[0] or 0)
+    row = await fetchone(
+        db,
+        f"""SELECT COALESCE(SUM(duration_seconds), 0)
+            FROM sessions
+            WHERE user_id=? AND guild_id=?
+              AND end_ts IS NOT NULL
+              AND {e_end} >= ? AND {e_end} < ?""",
+        (user_id, guild_id, start_s, end_s)
+    )
+    total = int((row or [0])[0] or 0)
 
     if include_active:
-        # 진행 중 세션(기간 끝 이전에 시작한 것)
         e_start = epoch_expr("start_ts")
-        rows = await db.execute_fetchall(
-            f"""SELECT {e_start} FROM sessions
+        rows = await fetchall(
+            db,
+            f"""SELECT {e_start}
+                FROM sessions
                 WHERE user_id=? AND guild_id=? AND end_ts IS NULL
                   AND {e_start} < ?""",
             (user_id, guild_id, end_s)
@@ -124,30 +126,28 @@ async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s:
     return total
 
 async def rank_between(db, guild_id: int, start_s: int, end_s: int, include_active=True, limit=10):
-    """길드 기준 랭킹(Top N). 종료+진행중 포함."""
     e_end = epoch_expr("end_ts")
-    # 종료된 세션 합계 먼저
-    rows = await db.execute_fetchall(
-        f"""
-        SELECT user_id, COALESCE(MAX(user_name), ''), COALESCE(SUM(duration_seconds),0) AS total
-        FROM sessions
-        WHERE guild_id=? AND end_ts IS NOT NULL
-          AND {e_end} >= ? AND {e_end} < ?
-        GROUP BY user_id
-        """, (guild_id, start_s, end_s)
+    rows = await fetchall(
+        db,
+        f"""SELECT user_id, COALESCE(MAX(user_name), ''), COALESCE(SUM(duration_seconds),0) AS total
+            FROM sessions
+            WHERE guild_id=? AND end_ts IS NOT NULL
+              AND {e_end} >= ? AND {e_end} < ?
+            GROUP BY user_id""",
+        (guild_id, start_s, end_s)
     )
     totals = {uid: int(t) for uid, _, t in rows}
     names  = {uid: name for uid, name, _ in rows}
 
     if include_active:
-        # 진행중 세션을 사용자별로 더한다
         e_start = epoch_expr("start_ts")
-        rows_a = await db.execute_fetchall(
+        rows_a = await fetchall(
+            db,
             f"""SELECT user_id, COALESCE(MAX(user_name), ''), {e_start}
                 FROM sessions
                 WHERE guild_id=? AND end_ts IS NULL
                   AND {e_start} < ?
-                GROUP BY id""",  # id별 row; 사용자별 합산은 아래에서
+                GROUP BY id""",
             (guild_id, end_s)
         )
         clamp_now = min(now_ts(), end_s)
@@ -159,13 +159,12 @@ async def rank_between(db, guild_id: int, start_s: int, end_s: int, include_acti
                 if uid not in names:
                     names[uid] = name or ""
 
-    # 정렬 및 Top N
     ordered = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:limit]
     return [(uid, names.get(uid, ""), tot) for uid, tot in ordered]
 
 # ===== Bot =====
 intents = discord.Intents.default()
-intents.message_content = True  # 일반 텍스트 명령
+intents.message_content = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
 
 @bot.event
@@ -174,7 +173,7 @@ async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print("Ready!")
 
-# --- 명령: 공부시작 ---
+# --- 공부시작 ---
 @bot.command(name="공부시작")
 async def cmd_start(ctx):
     user_id = ctx.author.id
@@ -182,8 +181,8 @@ async def cmd_start(ctx):
     g_id = guild_id_of(ctx)
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # 이미 진행중인지 확인
-        row = await db.execute_fetchone(
+        row = await fetchone(
+            db,
             "SELECT id FROM sessions WHERE user_id=? AND guild_id=? AND end_ts IS NULL",
             (user_id, g_id)
         )
@@ -199,7 +198,7 @@ async def cmd_start(ctx):
 
     await ctx.reply(f"공부 시작! 시작 시각: {now_dt().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# --- 명령: 공부끝 ---
+# --- 공부끝 ---
 @bot.command(name="공부끝")
 async def cmd_end(ctx):
     user_id = ctx.author.id
@@ -207,7 +206,8 @@ async def cmd_end(ctx):
     end_sec = now_ts()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        row = await db.execute_fetchone(
+        row = await fetchone(
+            db,
             "SELECT id, start_ts FROM sessions WHERE user_id=? AND guild_id=? AND end_ts IS NULL ORDER BY id DESC LIMIT 1",
             (user_id, g_id)
         )
@@ -227,25 +227,19 @@ async def cmd_end(ctx):
 
     await ctx.reply(f"공부 종료! 소요 시간: **{fmt_dur(dur)}**")
 
-# --- 명령: 통계 (개인) ---
+# --- 통계 ---
 @bot.command(name="통계")
 async def cmd_stats(ctx, period: str = ""):
-    """
-    사용법:
-      !통계            -> 오늘/주/월/연 요약 임베드
-      !통계 week       -> 해당 기간만
-    """
     g_id = guild_id_of(ctx)
     user_id = ctx.author.id
 
     async with aiosqlite.connect(DB_PATH) as db:
         if period.lower() in ("today", "week", "month", "year"):
-            start, end = period_range(period.lower())
-            total = await sum_user_between(db, user_id, g_id, int(start.timestamp()), int(end.timestamp()), include_active=True)
-            await ctx.reply(f"{ctx.author.mention}님의 `{period.lower()}` 공부 합계(진행 중 포함): **{fmt_dur(total)}**")
+            s, e = period_range(period.lower())
+            tot = await sum_user_between(db, user_id, g_id, int(s.timestamp()), int(e.timestamp()), include_active=True)
+            await ctx.reply(f"{ctx.author.mention}님의 `{period.lower()}` 공부 합계(진행 중 포함): **{fmt_dur(tot)}**")
             return
 
-        # 요약 임베드(today/week/month/year)
         periods = ["today", "week", "month", "year"]
         fields = []
         for p in periods:
@@ -261,22 +255,15 @@ async def cmd_stats(ctx, period: str = ""):
     name_map = {"today":"오늘", "week":"이번주", "month":"이번달", "year":"올해"}
     for k, v in fields:
         embed.add_field(name=name_map[k], value=fmt_dur(v), inline=False)
-
     await ctx.reply(embed=embed)
 
-# --- 명령: 랭킹 (서버 기준) ---
+# --- 랭킹 ---
 @bot.command(name="랭킹")
 async def cmd_rank(ctx, period: str = "today"):
-    """
-    사용법:
-      !랭킹            -> 기본 today
-      !랭킹 week|month|year|all
-    """
     period = period.lower()
     if period not in ("today", "week", "month", "year", "all"):
         await ctx.reply("기간은 `today|week|month|year|all` 중에서 선택해 주세요. 예) `!랭킹 month`")
         return
-
     g_id = guild_id_of(ctx)
     s, e = period_range(period)
 
@@ -292,15 +279,13 @@ async def cmd_rank(ctx, period: str = "today"):
     for i, (uid, name, tot) in enumerate(rows, start=1):
         display = name or f"<@{uid}>"
         embed.add_field(name=f"{i}. {display}", value=fmt_dur(tot), inline=False)
-
     await ctx.reply(embed=embed)
 
-# --- 명령: 전체현황(서버) ---
+# --- 전체현황 ---
 @bot.command(name="전체현황")
 async def cmd_overall(ctx):
     g_id = guild_id_of(ctx)
     async with aiosqlite.connect(DB_PATH) as db:
-        # 전체 누적(종료+진행중) 사용자 단위
         s_all, e_all = period_range("all")
         rows = await rank_between(db, g_id, int(s_all.timestamp()), int(e_all.timestamp()), include_active=True, limit=100)
 
@@ -309,7 +294,7 @@ async def cmd_overall(ctx):
         return
 
     total_users = len(rows)
-    total_time = sum(t for _, _, t in rows)
+    total_time  = sum(t for _, _, t in rows)
     avg = int(total_time / total_users) if total_users else 0
 
     embed = discord.Embed(
@@ -345,4 +330,6 @@ if __name__ == "__main__":
     else:
         intents = discord.Intents.default()
         intents.message_content = True
+        bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
+        # 위에서 정의한 cmd_* 함수들이 bot에 이미 데코레이터로 등록되어 있으므로, 여기서는 run만!
         bot.run(BOT_TOKEN)
