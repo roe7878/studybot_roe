@@ -196,8 +196,8 @@ async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print("Ready!")
 
-# --- 공부시작 ---
-@bot.command(name="공부시작")
+# --- 시작 ---
+@bot.command(name="시작")
 async def cmd_start(ctx):
     user_id = ctx.author.id
     user_name = str(ctx.author)
@@ -210,7 +210,7 @@ async def cmd_start(ctx):
             (user_id, g_id)
         )
         if row:
-            await ctx.reply("이미 공부 중이에요! `!공부끝`으로 종료해 주세요.")
+            await ctx.reply("이미 공부 중이에요! `!끝`으로 종료해 주세요.")
             return
 
         await db.execute(
@@ -221,8 +221,8 @@ async def cmd_start(ctx):
 
     await ctx.reply(f"공부 시작! 시작 시각: {now_dt().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# --- 공부끝 ---
-@bot.command(name="공부끝")
+# --- 끝 ---
+@bot.command(name="끝")
 async def cmd_end(ctx):
     user_id = ctx.author.id
     g_id = guild_id_of(ctx)
@@ -235,7 +235,7 @@ async def cmd_end(ctx):
             (user_id, g_id)
         )
         if not row:
-            await ctx.reply("진행 중인 공부가 없어요. `!공부시작`으로 시작해 주세요.")
+            await ctx.reply("진행 중인 공부가 없어요. `!시작`으로 시작해 주세요.")
             return
 
         sess_id, start_sec = row
@@ -260,7 +260,7 @@ async def cmd_stats(ctx, period: str = ""):
         if period.lower() in ("today", "week", "month", "year"):
             s, e = period_range(period.lower())
             tot = await sum_user_between(db, user_id, g_id, int(s.timestamp()), int(e.timestamp()), include_active=True)
-            await ctx.reply(f"{ctx.author.mention}님의 `{period.lower()}` 공부 합계(진행 중 포함): **{fmt_dur(tot)}**")
+            await ctx.reply(f"{ctx.author.mention}님의 `{period.lower()}` 공부 합계: **{fmt_dur(tot)}**")
             return
 
         periods = ["today", "week", "month", "year"]
@@ -271,7 +271,7 @@ async def cmd_stats(ctx, period: str = ""):
             fields.append((p, tot))
 
     embed = discord.Embed(
-        title=f"📈 {ctx.author.display_name} 님의 통계 (진행 중 포함)",
+        title=f"📈 {ctx.author.display_name} 님의 통계 ",
         color=0x2ecc71,
         timestamp=now_dt()
     )
@@ -304,8 +304,8 @@ async def cmd_rank(ctx, period: str = "today"):
         embed.add_field(name=f"{i}. {display}", value=fmt_dur(tot), inline=False)
     await ctx.reply(embed=embed)
 
-# --- 전체현황 ---
-@bot.command(name="전체현황")
+# --- 전체 ---
+@bot.command(name="전체")
 async def cmd_overall(ctx):
     g_id = guild_id_of(ctx)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -321,7 +321,7 @@ async def cmd_overall(ctx):
     avg = int(total_time / total_users) if total_users else 0
 
     embed = discord.Embed(
-        title="📊 전체 현황 (진행 중 포함)",
+        title="📊 전체 현황 ",
         description=f"전체 기록자: **{total_users}명**\n전체 누적: **{fmt_dur(total_time)}**\n1인 평균: **{fmt_dur(avg)}**",
         color=0x9b59b6
     )
@@ -387,11 +387,11 @@ async def cmd_sessions(ctx, period: str = "today"):
 async def cmd_help(ctx):
     msg = (
         "**공부봇 사용법**\n"
-        "`!공부시작` — 공부 시작\n"
-        "`!공부끝` — 공부 종료 및 저장\n"
+        "`!시작` — 공부 시작\n"
+        "`!끝` — 공부 종료 및 저장\n"
         "`!통계 [today|week|month|year]` — 기간별 합계(기본은 4개 기간 요약, 진행 중 포함)\n"
-        "`!랭킹 [today|week|month|year|all]` — 서버 랭킹(진행 중 포함)\n"
-        "`!전체현황` — 서버 전체 요약 + Top 10 (진행 중 포함)\n"
+        "`!랭킹 [today|week|month|year|all]` — 서버 랭킹\n"
+        "`!전체` — 서버 전체 요약 + Top 10 \n"
         "`!기록 [today|week|month|year]` — 기간 내 세션 목록 + 합계\n"
         "`!디버그` — DB 경로/세션 수 확인\n"
     )
@@ -403,3 +403,4 @@ if __name__ == "__main__":
         print("❗ STUDYBOT_TOKEN 환경변수에 디스코드 봇 토큰을 넣어주세요.")
     else:
         bot.run(BOT_TOKEN)
+
