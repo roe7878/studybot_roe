@@ -63,10 +63,9 @@ def guild_id_of(ctx) -> int:
     return ctx.guild.id if ctx.guild else 0
 
 def epoch_expr(col: str) -> str:
-    # INTEGER면 그대로, TEXT면 epoch으로 캐스팅
     return f"CASE WHEN typeof({col})='integer' THEN {col} ELSE CAST(strftime('%s', {col}) AS INTEGER) END"
 
-# === aiosqlite 호환 fetch 헬퍼 ===
+# === aiosqlite fetch 헬퍼 ===
 async def fetchone(db, q, params=()):
     async with db.execute(q, params) as cur:
         return await cur.fetchone()
@@ -75,7 +74,6 @@ async def fetchall(db, q, params=()):
     async with db.execute(q, params) as cur:
         return await cur.fetchall()
 
-# TEXT/INTEGER 혼재 안전 변환
 def _to_epoch_mixed(v) -> int:
     if isinstance(v, int):
         return v
@@ -104,7 +102,7 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_user ON sessions(user_id);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guild ON sessions(guild_id);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_end   ON sessions(end_ts);")
-        # 예전 데이터 보정: duration이 비었으면 start/end로 채우기 (타입 혼재 안전)
+        # 예전 데이터 보정: duration 빈 값 채우기
         await db.execute(
             f"""UPDATE sessions
                 SET duration_seconds = ({epoch_expr('end_ts')} - {epoch_expr('start_ts')})
@@ -112,28 +110,16 @@ async def init_db():
         )
         await db.commit()
 
-# ===== 합계/랭킹 계산 =====
-# ▶ 기간과 '세션의 실제 겹치는 구간'을 합산 (종료 + 진행중)
+# ===== 합계/랭킹 =====
+# ▶ sum_user_between: 모든 세션을 가져와서 파이썬에서 '기간과의 교집합' 길이 계산 (문자/정수 타입 혼용 안전)
 async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s: int, include_active=True) -> int:
     total = 0
 
-    # 1) 종료된 세션: 교집합 길이
+    # 종료된 세션 전부
     rows = await fetchall(
         db,
-        """
-        SELECT start_ts, end_ts
-        FROM sessions
-        WHERE user_id=? AND guild_id=? AND end_ts IS NOT NULL
-          AND (
-                (typeof(end_ts)='integer' AND end_ts > ?)
-             OR (typeof(end_ts)='text'    AND CAST(strftime('%s', end_ts) AS INTEGER) > ?)
-          )
-          AND (
-                (typeof(start_ts)='integer' AND start_ts < ?)
-             OR (typeof(start_ts)='text'    AND CAST(strftime('%s', start_ts) AS INTEGER) < ?)
-          )
-        """,
-        (user_id, guild_id, start_s, start_s, end_s, end_s)
+        "SELECT start_ts, end_ts FROM sessions WHERE user_id=? AND guild_id=? AND end_ts IS NOT NULL",
+        (user_id, guild_id)
     )
     for st, et in rows:
         st_e = _to_epoch_mixed(st)
@@ -142,7 +128,7 @@ async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s:
             continue
         total += max(0, min(et_e, end_s) - max(st_e, start_s))
 
-    # 2) 진행중 세션: end=now 간주
+    # 진행중 세션
     if include_active:
         rows_a = await fetchall(
             db,
@@ -157,6 +143,7 @@ async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s:
     return int(total)
 
 async def rank_between(db, guild_id: int, start_s: int, end_s: int, include_active=True, limit=10):
+    # (랭킹은 기존 방식 유지)
     e_end = epoch_expr("end_ts")
     rows = await fetchall(
         db,
