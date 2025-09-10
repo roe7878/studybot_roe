@@ -75,6 +75,18 @@ async def fetchall(db, q, params=()):
     async with db.execute(q, params) as cur:
         return await cur.fetchall()
 
+# TEXT/INTEGER 혼재 안전 변환
+def _to_epoch_mixed(v) -> int:
+    if isinstance(v, int):
+        return v
+    try:
+        dt = datetime.fromisoformat(str(v))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TIMEZONE)
+        return int(dt.timestamp())
+    except Exception:
+        return int(str(v))
+
 # ===== DB =====
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -95,37 +107,53 @@ async def init_db():
         await db.commit()
 
 # ===== 합계/랭킹 계산 =====
+# ▶ 수정 핵심: '세션과 기간의 실제 겹치는 구간'을 합산해서 누락 없이 합쳐짐
 async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s: int, include_active=True) -> int:
-    e_end = epoch_expr("end_ts")
-    row = await fetchone(
-        db,
-        f"""SELECT COALESCE(SUM(duration_seconds), 0)
-            FROM sessions
-            WHERE user_id=? AND guild_id=?
-              AND end_ts IS NOT NULL
-              AND {e_end} >= ? AND {e_end} < ?""",
-        (user_id, guild_id, start_s, end_s)
-    )
-    total = int((row or [0])[0] or 0)
+    total = 0
 
+    # 1) 종료된 세션: start~end 와 [start_s, end_s) 교집합 길이 합산
+    rows = await fetchall(
+        db,
+        """
+        SELECT start_ts, end_ts
+        FROM sessions
+        WHERE user_id=? AND guild_id=? AND end_ts IS NOT NULL
+          AND (
+                (typeof(end_ts)='integer' AND end_ts > ?)
+             OR (typeof(end_ts)='text'    AND CAST(strftime('%s', end_ts) AS INTEGER) > ?)
+          )
+          AND (
+                (typeof(start_ts)='integer' AND start_ts < ?)
+             OR (typeof(start_ts)='text'    AND CAST(strftime('%s', start_ts) AS INTEGER) < ?)
+          )
+        """,
+        (user_id, guild_id, start_s, start_s, end_s, end_s)
+    )
+    for st, et in rows:
+        st_e = _to_epoch_mixed(st)
+        et_e = _to_epoch_mixed(et)
+        if et_e <= st_e:
+            continue
+        overlap = max(0, min(et_e, end_s) - max(st_e, start_s))
+        total += overlap
+
+    # 2) 진행중 세션: end=now 로 간주하여 동일 계산
     if include_active:
-        e_start = epoch_expr("start_ts")
-        rows = await fetchall(
+        rows_a = await fetchall(
             db,
-            f"""SELECT {e_start}
-                FROM sessions
-                WHERE user_id=? AND guild_id=? AND end_ts IS NULL
-                  AND {e_start} < ?""",
-            (user_id, guild_id, end_s)
+            "SELECT start_ts FROM sessions WHERE user_id=? AND guild_id=? AND end_ts IS NULL",
+            (user_id, guild_id)
         )
         clamp_now = min(now_ts(), end_s)
-        for (st,) in rows:
-            st = int(st)
-            overlap = max(0, clamp_now - max(st, start_s))
+        for (st,) in rows_a:
+            st_e = _to_epoch_mixed(st)
+            overlap = max(0, clamp_now - max(st_e, start_s))
             total += overlap
-    return total
+
+    return int(total)
 
 async def rank_between(db, guild_id: int, start_s: int, end_s: int, include_active=True, limit=10):
+    # 랭킹은 기존 방식(종료 합계 + 진행중 가산) 유지
     e_end = epoch_expr("end_ts")
     rows = await fetchall(
         db,
@@ -329,4 +357,3 @@ if __name__ == "__main__":
         print("❗ STUDYBOT_TOKEN 환경변수에 디스코드 봇 토큰을 넣어주세요.")
     else:
         bot.run(BOT_TOKEN)
-
