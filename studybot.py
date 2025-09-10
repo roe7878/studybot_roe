@@ -219,7 +219,7 @@ async def cmd_start(ctx):
         )
         await db.commit()
 
-    await ctx.reply(f"공부 시작! 시작 시각: {now_dt().strftime('%Y-%m-%d %H:%M:%S')}")
+    await ctx.reply(f"공부 시작! {now_dt().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # --- 끝 ---
 @bot.command(name="끝")
@@ -248,7 +248,7 @@ async def cmd_end(ctx):
         )
         await db.commit()
 
-    await ctx.reply(f"공부 종료! 소요 시간: **{fmt_dur(dur)}**")
+    await ctx.reply(f"공부 종료! **{fmt_dur(dur)}**")
 
 # --- 통계 ---
 @bot.command(name="통계")
@@ -403,6 +403,7 @@ if __name__ == "__main__":
         print("❗ STUDYBOT_TOKEN 환경변수에 디스코드 봇 토큰을 넣어주세요.")
     else:
         bot.run(BOT_TOKEN)
+
 
 
 
