@@ -298,7 +298,7 @@ async def cmd_rank(ctx, period: str = "today"):
         return
 
     title_map = {"today":"오늘", "week":"이번주", "month":"이번달", "year":"올해", "all":"전체"}
-    embed = discord.Embed(title=f"🏆 {title_map[period]} 랭킹 (Top 10, )", color=0x3498db)
+    embed = discord.Embed(title=f"🏆 {title_map[period]} 랭킹 (Top 10)", color=0x3498db)
     for i, (uid, name, tot) in enumerate(rows, start=1):
         display = name or f"<@{uid}>"
         embed.add_field(name=f"{i}. {display}", value=fmt_dur(tot), inline=False)
@@ -403,5 +403,6 @@ if __name__ == "__main__":
         print("❗ STUDYBOT_TOKEN 환경변수에 디스코드 봇 토큰을 넣어주세요.")
     else:
         bot.run(BOT_TOKEN)
+
 
 
