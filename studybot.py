@@ -328,8 +328,5 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         print("❗ STUDYBOT_TOKEN 환경변수에 디스코드 봇 토큰을 넣어주세요.")
     else:
-        intents = discord.Intents.default()
-        intents.message_content = True
-        bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
-        # 위에서 정의한 cmd_* 함수들이 bot에 이미 데코레이터로 등록되어 있으므로, 여기서는 run만!
         bot.run(BOT_TOKEN)
+
