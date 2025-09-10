@@ -298,7 +298,7 @@ async def cmd_rank(ctx, period: str = "today"):
         return
 
     title_map = {"today":"오늘", "week":"이번주", "month":"이번달", "year":"올해", "all":"전체"}
-    embed = discord.Embed(title=f"🏆 {title_map[period]} 랭킹 (Top 10, 진행 중 포함)", color=0x3498db)
+    embed = discord.Embed(title=f"🏆 {title_map[period]} 랭킹 (Top 10, )", color=0x3498db)
     for i, (uid, name, tot) in enumerate(rows, start=1):
         display = name or f"<@{uid}>"
         embed.add_field(name=f"{i}. {display}", value=fmt_dur(tot), inline=False)
@@ -389,7 +389,7 @@ async def cmd_help(ctx):
         "**공부봇 사용법**\n"
         "`!시작` — 공부 시작\n"
         "`!끝` — 공부 종료 및 저장\n"
-        "`!통계 [today|week|month|year]` — 기간별 합계(기본은 4개 기간 요약, 진행 중 포함)\n"
+        "`!통계 [today|week|month|year]` — 기간별 합계(기본은 4개 기간 요약, )\n"
         "`!랭킹 [today|week|month|year|all]` — 서버 랭킹\n"
         "`!전체` — 서버 전체 요약 + Top 10 \n"
         "`!기록 [today|week|month|year]` — 기간 내 세션 목록 + 합계\n"
@@ -403,4 +403,5 @@ if __name__ == "__main__":
         print("❗ STUDYBOT_TOKEN 환경변수에 디스코드 봇 토큰을 넣어주세요.")
     else:
         bot.run(BOT_TOKEN)
+
 
