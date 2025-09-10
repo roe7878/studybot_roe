@@ -111,11 +111,11 @@ async def init_db():
         await db.commit()
 
 # ===== 합계/랭킹 =====
-# ▶ sum_user_between: 모든 세션을 가져와서 파이썬에서 '기간과의 교집합' 길이 계산 (문자/정수 타입 혼용 안전)
+# ▶ 합계: 모든 세션을 가져와 '기간과의 교집합' 길이로 정확히 계산 (문자/정수 타입 혼용 안전)
 async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s: int, include_active=True) -> int:
     total = 0
 
-    # 종료된 세션 전부
+    # 종료된 세션
     rows = await fetchall(
         db,
         "SELECT start_ts, end_ts FROM sessions WHERE user_id=? AND guild_id=? AND end_ts IS NOT NULL",
@@ -142,39 +142,44 @@ async def sum_user_between(db, user_id: int, guild_id: int, start_s: int, end_s:
 
     return int(total)
 
+# ▶ 랭킹: 유저별로 위와 같은 방식으로 누적(종료 + 진행중) → 정렬
 async def rank_between(db, guild_id: int, start_s: int, end_s: int, include_active=True, limit=10):
-    # (랭킹은 기존 방식 유지)
-    e_end = epoch_expr("end_ts")
+    totals = {}   # user_id -> seconds
+    names  = {}   # user_id -> display name
+
+    # 종료된 세션 모두 반영
     rows = await fetchall(
         db,
-        f"""SELECT user_id, COALESCE(MAX(user_name), ''), COALESCE(SUM(duration_seconds),0) AS total
-            FROM sessions
-            WHERE guild_id=? AND end_ts IS NOT NULL
-              AND {e_end} >= ? AND {e_end} < ?
-            GROUP BY user_id""",
-        (guild_id, start_s, end_s)
+        "SELECT user_id, COALESCE(user_name,''), start_ts, end_ts "
+        "FROM sessions WHERE guild_id=? AND end_ts IS NOT NULL",
+        (guild_id,)
     )
-    totals = {uid: int(t) for uid, _, t in rows}
-    names  = {uid: name for uid, name, _ in rows}
+    for uid, name, st, et in rows:
+        st_e = _to_epoch_mixed(st)
+        et_e = _to_epoch_mixed(et)
+        if et_e <= st_e:
+            continue
+        overlap = max(0, min(et_e, end_s) - max(st_e, start_s))
+        if overlap > 0:
+            totals[uid] = totals.get(uid, 0) + overlap
+            if uid not in names or not names[uid]:
+                names[uid] = name or ""
 
+    # 진행중 세션 반영
     if include_active:
-        e_start = epoch_expr("start_ts")
         rows_a = await fetchall(
             db,
-            f"""SELECT user_id, COALESCE(MAX(user_name), ''), {e_start}
-                FROM sessions
-                WHERE guild_id=? AND end_ts IS NULL
-                  AND {e_start} < ?
-                GROUP BY id""",
-            (guild_id, end_s)
+            "SELECT user_id, COALESCE(user_name,''), start_ts "
+            "FROM sessions WHERE guild_id=? AND end_ts IS NULL",
+            (guild_id,)
         )
         clamp_now = min(now_ts(), end_s)
         for uid, name, st in rows_a:
-            st = int(st)
-            overlap = max(0, clamp_now - max(st, start_s))
+            st_e = _to_epoch_mixed(st)
+            overlap = max(0, clamp_now - max(st_e, start_s))
             if overlap > 0:
                 totals[uid] = totals.get(uid, 0) + overlap
-                if uid not in names:
+                if uid not in names or not names[uid]:
                     names[uid] = name or ""
 
     ordered = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:limit]
